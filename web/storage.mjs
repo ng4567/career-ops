@@ -21,6 +21,9 @@ export const paths = {
   dataDir: DATA_DIR,
   cv: join(DATA_DIR, 'cv.md'),
   profile: join(DATA_DIR, 'config', 'profile.yml'),
+  // Shipped with the repo (always under ROOT, even when data lives elsewhere) so
+  // first-time users can see the full schema to customize.
+  profileExample: join(ROOT, 'config', 'profile.example.yml'),
   applications: join(DATA_DIR, 'data', 'applications.md'),
   portals: join(DATA_DIR, 'portals.yml'),
   reportsDir: join(DATA_DIR, 'reports'),
@@ -67,8 +70,13 @@ export async function writeProfile({ fullName, email, locations = [], targetRole
   const cleanLocations = (Array.isArray(locations) ? locations : [locations])
     .map(v => String(v || '').trim())
     .filter(Boolean);
+  // Merge into the existing profile (read fresh from disk) so the basic form
+  // never destroys the rich fields — archetypes, narrative, compensation, etc.
+  const existing = (await readProfile()) || {};
   const profile = {
+    ...existing,
     candidate: {
+      ...(existing.candidate || {}),
       full_name: fullName || '',
       email: email || '',
       locations: cleanLocations,
@@ -76,11 +84,59 @@ export async function writeProfile({ fullName, email, locations = [], targetRole
       location: cleanLocations.join(', '),
     },
     target_roles: {
+      ...(existing.target_roles || {}),
       primary: targetRoles,
     },
   };
   await writeFile(paths.profile, yaml.dump(profile), 'utf-8');
   return profile;
+}
+
+// ── Full profile editing (raw YAML) ─────────────────────────────────
+// The basic form above only touches a handful of fields. To let users
+// customize everything that drives evaluation and scanning (archetypes,
+// narrative, superpowers, proof points, compensation), expose the raw YAML.
+
+const MAX_PROFILE_BYTES = 256 * 1024;
+
+export async function readProfileText() {
+  if (existsSync(paths.profile)) return readFile(paths.profile, 'utf-8');
+  // No saved profile yet — return the shipped example so the editor shows the
+  // full schema for the user to fill in, instead of an empty box.
+  if (existsSync(paths.profileExample)) return readFile(paths.profileExample, 'utf-8');
+  return '';
+}
+
+export async function writeProfileText(text) {
+  if (typeof text !== 'string') {
+    throw badRequest('Profile YAML must be a string');
+  }
+  if (Buffer.byteLength(text, 'utf-8') > MAX_PROFILE_BYTES) {
+    throw badRequest('Profile YAML is too large (max 256KB)');
+  }
+  let parsed;
+  try {
+    parsed = yaml.load(text);
+  } catch (err) {
+    throw badRequest(`Invalid YAML: ${err.message}`);
+  }
+  if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    throw badRequest('Profile must be a YAML mapping of key: value pairs');
+  }
+  try {
+    JSON.stringify(parsed);
+  } catch {
+    throw badRequest('Profile YAML contains unsupported structures (e.g. cycles)');
+  }
+  // Write the text verbatim so comments and formatting survive.
+  await writeFile(paths.profile, text, 'utf-8');
+  return parsed;
+}
+
+function badRequest(message) {
+  const err = new Error(message);
+  err.status = 400;
+  return err;
 }
 
 // ── Portals / tracked companies (portals.yml) ───────────────────────

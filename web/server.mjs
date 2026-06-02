@@ -16,6 +16,8 @@ import {
   writeCv,
   readProfile,
   writeProfile,
+  readProfileText,
+  writeProfileText,
   readPortals,
   writePortals,
   nextReportNumber,
@@ -164,6 +166,29 @@ app.put('/api/profile', async (req, res, next) => {
     const profile = await writeProfile({ fullName, email, locations: locs, targetRoles });
     res.json(profile);
   } catch (err) {
+    next(err);
+  }
+});
+
+// Full profile as raw YAML — exposes every field that drives evaluation and
+// scanning (archetypes, narrative, superpowers, proof points, compensation).
+app.get('/api/profile/raw', async (_req, res, next) => {
+  try {
+    res.json({ yaml: await readProfileText() });
+  } catch (err) {
+    next(err);
+  }
+});
+
+app.put('/api/profile/raw', async (req, res, next) => {
+  try {
+    const profile = await writeProfileText(req.body?.yaml);
+    res.json({ ok: true, profile });
+  } catch (err) {
+    if (err.status === 400) {
+      res.status(400).json({ error: err.message });
+      return;
+    }
     next(err);
   }
 });
@@ -340,7 +365,13 @@ app.post('/api/companies/suggest', async (_req, res, next) => {
 // candidate's target roles and locations instead of generic portal keywords.
 async function scanFiltersFromProfile() {
   const profile = await readProfile();
-  const roleKeywords = profile?.target_roles?.primary || [];
+  const primary = profile?.target_roles?.primary || [];
+  // Include archetype names as fallback role keywords so customizing the richer
+  // profile (not just the basic target roles) actually broadens the scan.
+  const archetypes = (profile?.target_roles?.archetypes || [])
+    .map(a => (typeof a === 'string' ? a : a?.name))
+    .filter(Boolean);
+  const roleKeywords = [...new Set([...primary, ...archetypes].map(s => String(s).trim()).filter(Boolean))];
   const locations = profile?.candidate?.locations
     || (profile?.candidate?.location ? [profile.candidate.location] : []);
   return { roleKeywords, locations };
@@ -614,6 +645,19 @@ pre {
     <label>Target roles <span class="muted">(one per line — matched against job <strong>titles</strong>, e.g. "Teacher", "Attorney", "Finance Analyst")</span></label>
     <textarea id="targetRoles" placeholder="Teacher&#10;Immigration Attorney&#10;Finance Analyst"></textarea>
     <button onclick="saveProfile()">Save profile</button>
+    <p class="sub" style="margin-top:8px">Quick save preserves your full profile below, but normalizes YAML comments/formatting.</p>
+  </div>
+
+  <div class="block">
+    <p class="block-title">Full profile (advanced)</p>
+    <p class="sub">The complete <code>config/profile.yml</code> — archetypes, narrative, superpowers, proof points, compensation, location policy. <strong>These fields drive the AI evaluation and the job scan.</strong> Edit the YAML and save. (Archetype names are also used as fallback scan keywords.)</p>
+    <label>profile.yml</label>
+    <textarea id="profileYaml" spellcheck="false" style="min-height:340px; font-family: ui-monospace, 'SFMono-Regular', Consolas, monospace; font-size: 12.5px;" placeholder="candidate:&#10;  full_name: ..."></textarea>
+    <div class="btn-row">
+      <button onclick="saveFullProfile()">Save full profile</button>
+      <button class="ghost" onclick="loadFullProfile()">Reload from disk</button>
+    </div>
+    <div id="profileYamlStatus" class="muted"></div>
   </div>
 
   <div class="block">
@@ -744,8 +788,34 @@ async function saveProfile() {
   }
 }
 
-async function saveResume() {
+async function loadFullProfile() {
+  const status = document.getElementById('profileYamlStatus');
   try {
+    const res = await request('/api/profile/raw');
+    document.getElementById('profileYaml').value = (res && res.yaml) || '';
+    status.textContent = 'Loaded config/profile.yml.';
+  } catch (err) {
+    status.textContent = err.message;
+  }
+}
+
+async function saveFullProfile() {
+  const status = document.getElementById('profileYamlStatus');
+  status.textContent = 'Saving...';
+  try {
+    await request('/api/profile/raw', {
+      method: 'PUT',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ yaml: document.getElementById('profileYaml').value }),
+    });
+    status.textContent = 'Saved. Your full profile now drives evaluations and scans.';
+    await loadProfile();
+  } catch (err) {
+    status.textContent = 'Not saved — ' + err.message;
+  }
+}
+
+async function saveResume() {  try {
     const form = new FormData();
     form.append('canonicalMarkdown', document.getElementById('resumeMarkdown').value);
     const result = await request('/api/resumes', { method: 'POST', body: form });
@@ -787,6 +857,7 @@ async function loadCurrentResume() {
 
 async function init() {
   await loadProfile();
+  await loadFullProfile();
   await loadCurrentResume();
   await loadCompanies();
   show('Loaded saved profile, resume and tracked companies (if any).');
